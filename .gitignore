@@ -1,0 +1,55 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+
+# Release artifacts
+dist/
+*.app
+
+# Local card data and imported credentials
+*.mfd
+*.dump
+*.bin
+*.eml
+*.dic
+*.keys
+*.key
+card.json
+card-*.json
+dumps/
+backups/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.mobileprovision
+
+# Logs and crash reports
+*.log
+*.crash
+*.ips
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
