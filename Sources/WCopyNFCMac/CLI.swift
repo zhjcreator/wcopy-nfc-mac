@@ -29,7 +29,7 @@ enum CLIError: LocalizedError {
 struct CLIOptions {
     private static let booleanOptions: Set<String> = [
         "connect", "force", "help", "include-block0", "include-trailers",
-        "no-verify", "pretty", "verbose", "yes"
+        "no-verify", "pretty", "verbose", "yes", "skip-sector-0"
     ]
 
     private(set) var values: [String: [String]] = [:]
@@ -463,7 +463,7 @@ enum WCopyCLI {
     private static func restoreCommand(_ options: CLIOptions) throws -> CLICommandResult {
         try options.validate(
             valueOptions: deviceValueOptions.union(["card-mode", "format", "input", "key", "key-file", "key-type"]),
-            flagOptions: commonFlags.union(["include-block0", "include-trailers", "no-verify", "yes"])
+            flagOptions: commonFlags.union(["include-block0", "include-trailers", "no-verify", "skip-sector-0", "yes"])
         )
         try requireConfirmation(options, operation: "恢复卡片")
         guard let input = options.value("input") else { throw CLIError.usage("restore 需要 --input") }
@@ -482,7 +482,8 @@ enum WCopyCLI {
                     keyTypeOverride: keyType,
                     includeBlock0: options.hasFlag("include-block0"),
                     includeTrailers: options.hasFlag("include-trailers"),
-                    verify: !options.hasFlag("no-verify")
+                    verify: !options.hasFlag("no-verify"),
+                    skipSectorZero: options.hasFlag("skip-sector-0")
                 ),
                 scanMode: mode,
                 progress: progressLogger(options),
@@ -756,10 +757,10 @@ enum WCopyCLI {
         let url = fileURL(path)
         let format = try dumpFormat(options.value("format"), url: url)
         let data = format == "mfd" ? try dump.mfdData() : try dump.jsonData()
-        let writingOptions: Data.WritingOptions = options.hasFlag("force")
-            ? .atomic
-            : [.atomic, .withoutOverwriting]
-        do { try data.write(to: url, options: writingOptions) }
+        if !options.hasFlag("force") && FileManager.default.fileExists(atPath: url.path) {
+            throw CLIError.file("输出文件已存在，使用 --force 覆盖：\(url.path)")
+        }
+        do { try data.write(to: url, options: .atomic) }
         catch { throw CLIError.file("无法写入 \(url.path)：\(error.localizedDescription)") }
         return ["path": url.path, "format": format, "bytes": data.count]
     }

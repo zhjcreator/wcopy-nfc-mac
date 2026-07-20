@@ -12,6 +12,7 @@ struct RestoreOptions {
     var includeBlock0 = false
     var includeTrailers = false
     var verify = true
+    var skipSectorZero = false
 }
 
 struct RestoreResult {
@@ -357,8 +358,10 @@ final class WCopyReader {
         }
 
         let allBlocks = validatedDump.sortedBlocks
-        let normalBlocks = allBlocks.filter { $0.0 != 0 && !CardLayout.isTrailer($0.0) }
+        let skipSector0 = options.skipSectorZero
+        let normalBlocks = allBlocks.filter { $0.0 != 0 && !CardLayout.isTrailer($0.0) && (!skipSector0 || CardLayout.sector(containing: $0.0) != 0) }
         var trailerBlocks = options.includeTrailers ? allBlocks.filter { CardLayout.isTrailer($0.0) } : []
+        if skipSector0 { trailerBlocks = trailerBlocks.filter { CardLayout.sector(containing: $0.0) != 0 } }
         trailerBlocks = try trailerBlocks.map { block, rawData in
             let sector = CardLayout.sector(containing: block)
             guard let keys = validatedDump.sectorKeys?[String(sector)],
