@@ -70,7 +70,7 @@ final class LibNFCBridge {
             }
 
             var pollDescriptor = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pollDescriptor, 1, 100)
+            let ready = poll(&pollDescriptor, 1, 5)
             if ready < 0 {
                 logger("BRIDGE POLL error: \(String(cString: strerror(errno)))")
                 break
@@ -93,6 +93,9 @@ final class LibNFCBridge {
             }
 
             if buffer.range(of: Data([0x00, 0x00, 0xFF])) == nil, buffer.count > 2 {
+                if buffer.prefix(2) == Data([0x55, 0x55]) {
+                    try Self.writeAll(Self.ack, to: master)
+                }
                 buffer = buffer.suffix(2)
             }
 
@@ -145,7 +148,13 @@ final class LibNFCBridge {
             case 0x14: response = Data([0xD5, 0x15])
             case 0x52: response = Data([0xD5, 0x53, 0x00])
             case 0x16: response = Data([0xD5, 0x17, 0x00])
-            default: response = try reader.rawPN532(payload)
+            default:
+                do {
+                    response = try reader.rawPN532(payload)
+                } catch {
+                    logger("BRIDGE TIMEOUT for D4 \(String(format: "%02X", command))：返回合成错误响应")
+                    response = Self.syntheticTimeoutResponse(for: payload)
+                }
             }
         }
         if response.suffix(2) == Data([0x90, 0x00]) { response.removeLast(2) }
@@ -159,6 +168,25 @@ final class LibNFCBridge {
             }
         }
         return response
+    }
+
+    private static func syntheticTimeoutResponse(for payload: Data) -> Data {
+        guard payload.count >= 2 else { return Data([0xD5, 0x00]) }
+        let command = payload[1]
+        switch command {
+        case 0x40:
+            return Data([0xD5, 0x41, 0x01])
+        case 0x4A:
+            return Data([0xD5, 0x4B, 0x01, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00])
+        case 0x02:
+            return Data([0xD5, 0x03, 0x00, 0x00, 0x00])
+        case 0x06:
+            return Data([0xD5, 0x07, 0x00])
+        case 0x32:
+            return Data([0xD5, 0x33, 0x00])
+        default:
+            return Data([0xD5, UInt8(command) + 1, 0x00])
+        }
     }
 
     static func normalizeSAK19ForLegacyLibNFC(_ response: Data) -> Data {

@@ -239,4 +239,21 @@ final class ProtocolTests: XCTestCase {
         otherATQA[5] = 0x44
         XCTAssertEqual(LibNFCBridge.normalizeSAK19ForLegacyLibNFC(otherATQA), otherATQA)
     }
+
+    func testGUIBridgeExtractsMfocExitCodeFromCLIOutput() {
+        let output = Data("""
+        [wcopy-nfc] libnfc command finished
+        {"command":"bridge","data":{"command":"mfoc -O /tmp/card.mfd","exitCode":1},"ok":true,"schemaVersion":1}
+        """.utf8)
+        XCTAssertEqual(AppModel.bridgeExitCode(from: output), 1)
+        XCTAssertNil(AppModel.bridgeExitCode(from: Data("not json".utf8)))
+    }
+
+    func testGUIBridgeFiltersOnlyHighFrequencyProtocolLogs() {
+        XCTAssertFalse(AppModel.shouldDisplayCLIBridgeLogLine("[wcopy-nfc] BRIDGE READ 19 bytes: 00 00 FF"))
+        XCTAssertFalse(AppModel.shouldDisplayCLIBridgeLogLine("[wcopy-nfc] libnfc InListPassiveTarget raw response (12B): D5 4B"))
+        XCTAssertFalse(AppModel.shouldDisplayCLIBridgeLogLine("[wcopy-nfc] libnfc 兼容：仅向旧工具将 SAK 19 报告为 Classic 1K SAK 08"))
+        XCTAssertTrue(AppModel.shouldDisplayCLIBridgeLogLine("Auth with all sectors succeeded"))
+        XCTAssertTrue(AppModel.shouldDisplayCLIBridgeLogLine("[wcopy-nfc] BRIDGE TIMEOUT for D4 40"))
+    }
 }

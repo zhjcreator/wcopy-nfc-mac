@@ -110,7 +110,7 @@ struct CLICommandResult {
 
 enum WCopyCLI {
     static let schemaVersion = 1
-    static let version = "1.2.1"
+    static let version = "1.3.0"
     private static let deviceValueOptions: Set<String> = ["device-id", "device-index", "sync-radius"]
     private static let commonFlags: Set<String> = ["pretty", "verbose"]
     private static let cancellationToken = CancellationToken()
@@ -578,7 +578,7 @@ enum WCopyCLI {
         }
         let command = [
             "/bin/zsh", "-lc",
-            "export LIBNFC_LOG_LEVEL=3; export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; exec \(commandLine)"
+            "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; exec \(commandLine)"
         ]
         let exitCode = try withReader(options) { reader, _, _, _ in
             let bridge = LibNFCBridge(reader: reader, logger: { log($0) })

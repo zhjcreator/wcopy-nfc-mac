@@ -13,6 +13,7 @@ struct RestoreOptions {
     var includeTrailers = false
     var verify = true
     var skipSectorZero = false
+    var targetSectorKeys: [Int: SectorKeyResult]?
 }
 
 struct RestoreResult {
@@ -401,16 +402,33 @@ final class WCopyReader {
 
         let sectorsToAuthenticate = Set((normalBlocks + trailerBlocks).map { CardLayout.sector(containing: $0.0) })
             .union(block0 == nil ? [] : [0])
+        var sectorAuthKeys: [Int: (key: Data, type: KeyType)] = [:]
         for sector in sectorsToAuthenticate.sorted() {
             try token?.check()
-            let auth = try authentication(for: sector, dump: validatedDump, options: options)
-            guard try authenticate(
-                block: CardLayout.firstBlock(of: sector),
-                uid: target.uid,
-                key: auth.key,
-                type: auth.type
-            ) else {
-                throw AppError.operation("写入前检查失败：目标卡扇区 \(sector) 无法使用指定密钥认证，未写入任何块。")
+            let first = CardLayout.firstBlock(of: sector)
+            let primaryAuth = try authentication(for: sector, dump: validatedDump, options: options)
+            let hasExplicitOverride = !(options.keyOverride?.isEmpty ?? true)
+            if try authenticate(block: first, uid: target.uid, key: primaryAuth.key, type: primaryAuth.type) {
+                sectorAuthKeys[sector] = primaryAuth
+                continue
+            }
+            if hasExplicitOverride {
+                throw AppError.operation("目标卡扇区 \(sector) 无法使用指定密钥认证，未写入任何块。")
+            }
+            var found = false
+            for defKey in ["FFFFFFFFFFFF", "000000000000"] {
+                for type: KeyType in [.a, .b] {
+                    guard let dk = try? validatedKey(defKey) else { continue }
+                    if try authenticate(block: first, uid: target.uid, key: dk, type: type) {
+                        sectorAuthKeys[sector] = (dk, type)
+                        found = true
+                        break
+                    }
+                }
+                if found { break }
+            }
+            guard found else {
+                throw AppError.operation("目标卡扇区 \(sector) 无法认证。请在「目标卡片密钥」中输入当前卡片对应扇区的密钥后重试。")
             }
         }
 
@@ -426,7 +444,12 @@ final class WCopyReader {
             let normalSectors = Dictionary(grouping: normalBlocks, by: { CardLayout.sector(containing: $0.0) })
             for sector in normalSectors.keys.sorted() {
                 try token?.check()
-                let auth = try authentication(for: sector, dump: validatedDump, options: options)
+                let auth: (key: Data, type: KeyType)
+                if let cached = sectorAuthKeys[sector] {
+                    auth = cached
+                } else {
+                    auth = try authentication(for: sector, dump: validatedDump, options: options)
+                }
                 let first = CardLayout.firstBlock(of: sector)
                 guard try authenticate(block: first, uid: target.uid, key: auth.key, type: auth.type) else {
                     let sectorBlocks = normalSectors[sector]!.map(\.0)
@@ -460,7 +483,12 @@ final class WCopyReader {
                 completed += 1
                 logger("扇区 0 普通数据写入失败，已跳过块 0")
             } else if let data = block0 {
-                let auth = try authentication(for: 0, dump: validatedDump, options: options)
+                let auth: (key: Data, type: KeyType)
+                if let cached = sectorAuthKeys[0] {
+                    auth = cached
+                } else {
+                    auth = try authentication(for: 0, dump: validatedDump, options: options)
+                }
                 if try authenticate(block: 0, uid: target.uid, key: auth.key, type: auth.type) {
                     attemptedBlocks.append(0)
                     let accepted = try writeBlock(0, data: data)
@@ -502,7 +530,12 @@ final class WCopyReader {
                     logger("扇区 \(sector)：普通数据写入失败，已保留原尾块")
                     continue
                 }
-                let auth = try authentication(for: sector, dump: validatedDump, options: options)
+                let auth: (key: Data, type: KeyType)
+                if let cached = sectorAuthKeys[sector] {
+                    auth = cached
+                } else {
+                    auth = try authentication(for: sector, dump: validatedDump, options: options)
+                }
                 try token?.check()
                 progress?(total == 0 ? 1 : Double(completed) / Double(total), "写入扇区 \(sector) 尾块")
                 var ok = try authenticate(
@@ -837,12 +870,18 @@ final class WCopyReader {
         if let override = options.keyOverride, !override.isEmpty {
             return (try validatedKey(override), options.keyTypeOverride ?? .a)
         }
-        let stored = dump.sectorKeys?[String(sector)]
-        if let keyA = stored?.a { return (try validatedKey(keyA), options.keyTypeOverride ?? .a) }
-        if let keyB = stored?.b, stored?.bAuthenticates != false {
-            return (try validatedKey(keyB), options.keyTypeOverride ?? .b)
+        if let targetKeys = options.targetSectorKeys?[sector] {
+            if let keyA = targetKeys.keyA { return (try validatedKey(keyA), .a) }
+            if let keyB = targetKeys.keyB, targetKeys.keyBAuthenticates != false {
+                return (try validatedKey(keyB), .b)
+            }
         }
-        let type = options.keyTypeOverride ?? KeyType(rawValue: dump.keyType) ?? .a
+        let stored = dump.sectorKeys?[String(sector)]
+        if let keyA = stored?.a { return (try validatedKey(keyA), .a) }
+        if let keyB = stored?.b, stored?.bAuthenticates != false {
+            return (try validatedKey(keyB), .b)
+        }
+        let type = KeyType(rawValue: dump.keyType) ?? .a
         return (try validatedKey(dump.key), type)
     }
 

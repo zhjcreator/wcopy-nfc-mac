@@ -160,7 +160,11 @@ Key[5] = UID[2] XOR UID[3]
 brew install libnfc mfoc mfcuk
 ```
 
-桥接在应用内创建 PTY，并设置 `LIBNFC_DEFAULT_DEVICE=pn532_uart:<pty>`。上游验证过 `nfc-list`
+GUI 启动桥接命令时会先释放自身的 HID 连接，再调用与 `dist/wcopy-nfc` 相同的 CLI 桥接路径。
+子进程会创建全新 transport、重新同步并初始化读卡器，然后创建 PTY 并设置
+`LIBNFC_DEFAULT_DEVICE=pn532_uart:<pty>`；命令结束后需在 GUI 中重新连接。
+GUI 会批量刷新桥接输出并隐藏高频逐帧预览，避免长时间 mfoc 恢复拖死界面；密钥结果、进度、
+警告和错误仍会显示。上游验证过 `nfc-list`
 及 `mfoc` 默认密钥字典阶段；真正的 nested / DarkSide 攻击尚未在该硬件上完成实测。
 对 `SAK 19 + ATQA 0004 + 4 字节 UID`，桥接仅在返回给不认识 SAK 19 的旧 libnfc 工具时把
 寻卡响应中的 SAK 映射为标准 1K 的 `08`；应用内记录和实体卡始终保持原始 `19`。

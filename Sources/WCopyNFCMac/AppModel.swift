@@ -5,8 +5,8 @@ import Foundation
 enum NavigationPage: String, CaseIterable, Identifiable {
     case overview = "概览"
     case read = "读取与备份"
-    case keys = "密钥检查"
     case restore = "恢复转储"
+    case mfocRecovery = "mfoc 密钥恢复"
     case uid = "UID 工具"
     case format = "格式化"
     case libnfc = "libnfc 桥接"
@@ -17,8 +17,8 @@ enum NavigationPage: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "square.grid.2x2"
         case .read: return "wave.3.right.circle"
-        case .keys: return "key.horizontal"
         case .restore: return "square.and.arrow.down.on.square"
+        case .mfocRecovery: return "key.horizontal"
         case .uid: return "number.square"
         case .format: return "eraser"
         case .libnfc: return "point.3.connected.trianglepath.dotted"
@@ -61,10 +61,12 @@ final class AppModel: ObservableObject {
     @Published var noticeMessage: String?
     @Published var readResult: ReadResult?
     @Published var activeDump: DumpDocument?
-    @Published var importedDump: DumpDocument?
+        @Published var importedDump: DumpDocument?
+    @Published var detectedSectorKeys: [Int: SectorKeyResult]?
     @Published var keyResults: [Int: SectorKeyResult] = [:]
     @Published var keyCheckAttempts = 0
     @Published var keyCandidateCount = 0
+    @Published var showMfocPrompt = false
     @Published var rawResponse = ""
 
     private let operationQueue = DispatchQueue(label: "app.wcopy.nfc.operation", qos: .userInitiated)
@@ -210,26 +212,31 @@ final class AppModel: ObservableObject {
                 self?.readResult = readResult
                 self?.activeDump = dump
                 let foundSlots = results.values.reduce(0) { $0 + ($1.keyA == nil ? 0 : 1) + ($1.keyB == nil ? 0 : 1) }
-                self?.noticeMessage = "完成 \(outcome.attempts) 次认证，找到 \(foundSlots)/\(results.count * 2) 个密钥槽"
+                let totalSlots = results.count * 2
+                if foundSlots < totalSlots {
+                    self?.noticeMessage = nil
+                    self?.showMfocPrompt = true
+                } else {
+                    self?.noticeMessage = "完成 \(outcome.attempts) 次认证，找到 \(foundSlots)/\(totalSlots) 个密钥槽"
+                }
             }
         }
     }
 
     func pasteSectorKey(_ clipboardValue: String, sector: Int, type: KeyType) {
         guard let reader else { errorMessage = AppError.notConnected.localizedDescription; return }
-        guard let target = readResult?.target, var result = keyResults[sector] else {
-            errorMessage = "请先运行密钥检查"
-            return
-        }
-        if type == .b, result.keyBAuthenticates == false {
-            errorMessage = "扇区 \(sector) 的 Key B 字段是 DATA，不能用于 Key B 认证"
-            return
-        }
         let key: String
         do { key = try normalizeMifareKey(clipboardValue) }
         catch { errorMessage = AppError.invalidKey.localizedDescription; return }
 
+        let currentResults = keyResults
         startOperation(label: "验证扇区 \(sector) Key \(type.rawValue)") { [weak self] token in
+            guard let self else { return }
+            guard let target = try reader.selectTarget() else { throw AppError.noCard }
+            var result = currentResults[sector] ?? SectorKeyResult(sector: sector)
+            if type == .b, result.keyBAuthenticates == false {
+                throw AppError.operation("扇区 \(sector) 的 Key B 字段是 DATA，不能用于 Key B 认证")
+            }
             guard try reader.verifySectorKey(
                 keyHex: key,
                 sector: sector,
@@ -248,8 +255,6 @@ final class AppModel: ObservableObject {
                     result.keyBAuthenticates = true
                 }
                 self.keyResults[sector] = result
-                self.keyCheckAttempts += 1
-                self.rebuildActiveDumpFromKeyResults()
                 self.noticeMessage = "扇区 \(sector) Key \(type.rawValue) 已验证并保存"
             }
         }
@@ -292,6 +297,55 @@ final class AppModel: ObservableObject {
                 self?.noticeMessage = "恢复完成：写入 \(result.written) 块，失败 \(result.failed.count) 块，安全跳过 \(result.skipped) 块"
             }
         }
+    }
+
+    func detectTargetKeys(scanMode: CardScanMode, preset: KeyDictionaryPreset = .quick, completion: @escaping ([Int: SectorKeyResult]) -> Void) {
+        guard let reader else { errorMessage = AppError.notConnected.localizedDescription; completion([:]); return }
+        startOperation(label: "检测目标卡密钥") { [weak self] token in
+            let outcome = try reader.checkKeys(
+                candidates: preset.keys,
+                scanMode: scanMode,
+                progress: { value, text in self?.updateProgress(value, text: text) },
+                token: token
+            )
+            Task { @MainActor [weak self] in
+                self?.detectedSectorKeys = outcome.sectorKeys
+                self?.keyResults = outcome.sectorKeys
+                completion(outcome.sectorKeys)
+                let found = outcome.sectorKeys.values.reduce(0) { $0 + ($1.keyA == nil ? 0 : 1) + ($1.keyB == nil ? 0 : 1) }
+                self?.noticeMessage = "检测到 \(found)/\(outcome.sectorKeys.count * 2) 个密钥槽"
+            }
+        }
+    }
+
+    func importSectorKeys(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let raw = try decoder.decode([String: [String: String?]].self, from: data)
+            var keys: [Int: SectorKeyResult] = [:]
+            for (sectorStr, keyMap) in raw {
+                guard let sector = Int(sectorStr), sector >= 0, sector < 64 else { continue }
+                let keyA = keyMap["a"].flatMap { $0 }.flatMap { (try? HexCodec.data(from: $0, expectedBytes: 6)).map { HexCodec.string($0) } }
+                let keyB = keyMap["b"].flatMap { $0 }.flatMap { (try? HexCodec.data(from: $0, expectedBytes: 6)).map { HexCodec.string($0) } }
+                guard keyA != nil || keyB != nil else { continue }
+                keys[sector] = SectorKeyResult(sector: sector, keyA: keyA, keyB: keyB, keyBAuthenticates: keyB != nil ? true : nil)
+            }
+            detectedSectorKeys = keys.isEmpty ? nil : keys
+            keyResults = keys
+            noticeMessage = keys.isEmpty ? "未从文件中读取到有效扇区密钥" : "已导入 \(keys.count) 个扇区的密钥"
+        } catch {
+            errorMessage = "扇区密钥文件解析失败：\(error.localizedDescription)"
+        }
+    }
+
+    func goToMfocRecovery() {
+        showMfocPrompt = false
+        page = .mfocRecovery
+    }
+
+    func dismissMfocPrompt() {
+        showMfocPrompt = false
     }
 
     func writeUID(uid: String, key: String) {
@@ -344,21 +398,151 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func runLibNFC(commandLine: String) {
-        guard let reader else { errorMessage = AppError.notConnected.localizedDescription; return }
+    func runLibNFC(commandLine: String, statusCode: ((Int32) -> Void)? = nil, completion: ((Int32) -> Void)? = nil) {
         guard !commandLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "请输入 libnfc 命令"
             return
         }
-        let command = [
-            "/bin/zsh", "-lc",
-            "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; exec \(commandLine)"
-        ]
-        startOperation(label: "libnfc 桥接") { [weak self] token in
-            let bridge = LibNFCBridge(reader: reader, logger: self?.appendLog ?? { _ in })
-            let status = try bridge.run(command: command, token: token)
-            Task { @MainActor [weak self] in self?.noticeMessage = "libnfc 命令结束，退出码 \(status)" }
+        guard !busy, connectionState == .connected, let reader else {
+            errorMessage = AppError.notConnected.localizedDescription
+            return
         }
+        let executableURL = Bundle.main.executableURL
+            ?? URL(fileURLWithPath: CommandLine.arguments[0])
+
+        // The verified terminal flow starts with a fresh HID session. Release the
+        // GUI session before launching this same executable in CLI mode.
+        reader.close()
+        self.reader = nil
+        connectionState = .disconnected
+        firmware = "-"
+        readerSerial = "-"
+        sequence = "-"
+
+        startOperation(label: "libnfc 桥接", allowDisconnected: true) { [weak self] token in
+            let status = try Self.runCLIBridge(
+                executableURL: executableURL,
+                commandLine: commandLine,
+                logger: self?.appendLog ?? { _ in },
+                token: token
+            )
+            Task { @MainActor [weak self] in
+                self?.noticeMessage = "libnfc 命令结束，退出码 \(status)；读卡器已释放，请重新连接后继续操作"
+                statusCode?(status)
+                completion?(status)
+            }
+        }
+    }
+
+    nonisolated private static func runCLIBridge(
+        executableURL: URL,
+        commandLine: String,
+        logger: @escaping (String) -> Void,
+        token: CancellationToken
+    ) throws -> Int32 {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["cli", "bridge", "--command", commandLine, "--verbose"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+        } catch {
+            throw AppError.operation("无法启动 CLI 桥接：\(error.localizedDescription)")
+        }
+        try? pipe.fileHandleForWriting.close()
+
+        let outputQueue = DispatchQueue(label: "app.wcopy.nfc.cli-output")
+        let outputGroup = DispatchGroup()
+        var output = Data()
+        outputGroup.enter()
+        outputQueue.async {
+            defer { outputGroup.leave() }
+            var lineBuffer = ""
+            var displayBuffer = ""
+            var hiddenProtocolLines = 0
+            var lastDisplayUpdate = Date()
+            while let chunk = try? pipe.fileHandleForReading.read(upToCount: 4096),
+                  !chunk.isEmpty {
+                output.append(chunk)
+                lineBuffer += String(decoding: chunk, as: UTF8.self)
+                let lines = lineBuffer.components(separatedBy: "\n")
+                lineBuffer = lines.last ?? ""
+                for line in lines.dropLast() {
+                    let cleaned = line.trimmingCharacters(in: .newlines)
+                    guard !cleaned.isEmpty else { continue }
+                    if shouldDisplayCLIBridgeLogLine(cleaned) {
+                        displayBuffer += cleaned + "\n"
+                    } else {
+                        hiddenProtocolLines += 1
+                    }
+                }
+                if displayBuffer.utf8.count >= 16_384
+                    || Date().timeIntervalSince(lastDisplayUpdate) >= 0.25 {
+                    logger(displayBuffer.trimmingCharacters(in: .newlines))
+                    displayBuffer = ""
+                    lastDisplayUpdate = Date()
+                }
+            }
+            let finalLine = lineBuffer.trimmingCharacters(in: .newlines)
+            if !finalLine.isEmpty {
+                if shouldDisplayCLIBridgeLogLine(finalLine) {
+                    displayBuffer += finalLine + "\n"
+                } else {
+                    hiddenProtocolLines += 1
+                }
+            }
+            if hiddenProtocolLines > 0 {
+                displayBuffer += "GUI 已隐藏 \(hiddenProtocolLines) 条高频 PN532 帧明细；完整协议仍由 CLI 正常处理。\n"
+            }
+            let finalDisplay = displayBuffer.trimmingCharacters(in: .newlines)
+            if !finalDisplay.isEmpty {
+                logger(finalDisplay)
+            }
+        }
+
+        while process.isRunning {
+            do {
+                try token.check()
+            } catch {
+                process.terminate()
+                process.waitUntilExit()
+                outputGroup.wait()
+                throw error
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        process.waitUntilExit()
+        outputGroup.wait()
+
+        return bridgeExitCode(from: output) ?? process.terminationStatus
+    }
+
+    nonisolated static func bridgeExitCode(from output: Data) -> Int32? {
+        let lines = String(decoding: output, as: UTF8.self).split(separator: "\n").reversed()
+        for line in lines {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["command"] as? String == "bridge",
+                  let payload = object["data"] as? [String: Any],
+                  let exitCode = payload["exitCode"] as? NSNumber else {
+                continue
+            }
+            return exitCode.int32Value
+        }
+        return nil
+    }
+
+    nonisolated static func shouldDisplayCLIBridgeLogLine(_ line: String) -> Bool {
+        let highFrequencyDetails = [
+            "[wcopy-nfc] BRIDGE READ ",
+            "[wcopy-nfc] libnfc InListPassiveTarget raw response",
+            "[wcopy-nfc] libnfc 兼容：仅向旧工具将 SAK 19"
+        ]
+        return !highFrequencyDetails.contains { line.contains($0) }
     }
 
     func importDump(from url: URL) {
@@ -408,8 +592,14 @@ final class AppModel: ObservableObject {
     nonisolated private func appendLog(_ message: String) {
         guard !message.isEmpty else { return }
         Task { @MainActor [weak self] in
+            guard let self else { return }
             let stamp = Date.now.formatted(date: .omitted, time: .standard)
-            self?.logText += "[\(stamp)] \(message)\n"
+            let updated = self.logText + "[\(stamp)] \(message)\n"
+            if updated.count > 100_000 {
+                self.logText = "[较早日志已截断]\n" + String(updated.suffix(80_000))
+            } else {
+                self.logText = updated
+            }
         }
     }
 

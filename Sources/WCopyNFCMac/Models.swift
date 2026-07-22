@@ -45,6 +45,10 @@ struct MutationError: LocalizedError {
     }
 }
 
+enum AppVersion {
+    static let current = "1.3.0"
+}
+
 enum HexCodec {
     static func data(from value: String, expectedBytes: Int? = nil) throws -> Data {
         let cleaned = value

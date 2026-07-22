@@ -200,7 +200,12 @@ reader during write or format operations.
 brew install libnfc mfoc mfcuk
 ```
 
-The bridge creates a PTY inside the app and sets `LIBNFC_DEFAULT_DEVICE=pn532_uart:<pty>`.
+When the GUI starts a bridge command, it first releases its HID connection and launches the
+same CLI bridge path used by `dist/wcopy-nfc`. The child process creates a fresh transport,
+synchronizes and initializes the reader, creates the PTY, and sets
+`LIBNFC_DEFAULT_DEVICE=pn532_uart:<pty>`. Reconnect in the GUI after the command finishes.
+The GUI batches bridge output and omits high-frequency frame previews so long mfoc recovery
+runs do not block the interface; key results, progress, warnings, and errors remain visible.
 Upstream has verified `nfc-list` and the `mfoc` default‑key dictionary phase; true
 nested / DarkSide attacks have not yet been tested on this hardware.
 
